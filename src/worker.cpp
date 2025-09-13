@@ -6,7 +6,7 @@
 #include <cstring>      // Para strcmp()
 #include "pgm_utils.h"  // Estruturas e funções para PGM
 #include "filters.h"    // Funções de filtro negativo e slice
-
+using namespace std;
 // Número de threads que vamos usar
 const int NUM_THREADS = 4;
 
@@ -43,7 +43,7 @@ void* process_lines(void* arg) {
 int main(int argc, char** argv) {
     // Verifica se os argumentos foram passados corretamente
     if (argc < 3) {
-        std::cerr << "Uso: " << argv[0] << " <saida.pgm> <negativo|slice> [t1 t2]" << std::endl;
+        cerr << "Uso: " << argv[0] << " <saida.pgm> <negativo|slice> [t1 t2]" << endl;
         return -1;
     }
 
@@ -55,25 +55,19 @@ int main(int argc, char** argv) {
     else if (strcmp(mode, "slice") == 0) {
         g_mode = 1;
         if (argc < 5) { // Slice precisa dos limites t1 e t2
-            std::cerr << "Para slice, informe t1 e t2!" << std::endl;
+           cerr << "Para slice, informe t1 e t2!" << endl;
             return -1;
         }
         g_t1 = atoi(argv[3]); // Converte argumento string para inteiro
         g_t2 = atoi(argv[4]);
     } else { // Modo inválido
-        std::cerr << "Modo inválido!" << std::endl;
+        cerr << "Modo inválido!" << endl;
         return -1;
     }
 
     // Cria o FIFO no Linux, se ainda não existir
     mkfifo("/tmp/imgpipe", 0666);
 
-    // Abre o FIFO para leitura (bloqueia até o sender escrever)
-    /*int fifo = open("/tmp/imgpipe", O_RDWR);
-    if (fifo == -1) {
-        perror("Erro ao abrir FIFO");
-        return -1;
-    }*/
     int fifo = open("/tmp/imgpipe", O_RDONLY);
     if (fifo == -1) { perror("Erro ao abrir FIFO"); return -1; }
 
@@ -83,35 +77,9 @@ int main(int argc, char** argv) {
     FD_SET(fifo, &rfds);
     select(fifo + 1, &rfds, NULL, NULL, NULL);
 
-    std::cout << "Worker: metadados recebidos -> largura=" << g_in.w
-          << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << std::endl;
+    cout << "Worker: metadados recebidos -> largura=" << g_in.w
+          << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << endl;
 
-    // Lê metadados da imagem enviados pelo sender
-    /*read(fifo, &g_in.w, sizeof(g_in.w));   // Largura
-    read(fifo, &g_in.h, sizeof(g_in.h));   // Altura
-    read(fifo, &g_in.maxv, sizeof(g_in.maxv)); // Valor máximo do pixel
-    
-
-    if (read_n_bytes(fifo, &g_in.w, sizeof(int)) != sizeof(int) ||
-        read_n_bytes(fifo, &g_in.h, sizeof(int)) != sizeof(int) ||
-        read_n_bytes(fifo, &g_in.maxv, sizeof(int)) != sizeof(int)) {
-        fprintf(stderr, "Erro ao ler metadados do FIFO\n");
-        exit(1);
-    }*/
-
-    /*// Lê metadados da imagem enviados pelo sender
-    read(fifo, &g_in.w, sizeof(g_in.w));   // Largura
-    read(fifo, &g_in.h, sizeof(g_in.h));   // Altura
-    read(fifo, &g_in.maxv, sizeof(g_in.maxv)); // Valor máximo do pixel
-
-    std::cout << "Worker: metadados recebidos -> largura=" << g_in.w
-            << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << std::endl;
-
-
-    // Aloca memória para a imagem de entrada e saída
-    g_in.data = (unsigned char*)malloc(g_in.w * g_in.h);   // Entrada
-    g_out.data = (unsigned char*)malloc(g_in.w * g_in.h);  // Saída
-*/
 
     // Lê metadados
     read(fifo, &g_in.w, sizeof(g_in.w));
@@ -123,8 +91,8 @@ int main(int argc, char** argv) {
     g_out.h    = g_in.h;
     g_out.maxv = g_in.maxv;
 
-    std::cout << "Worker: metadados recebidos -> largura=" << g_in.w
-            << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << std::endl;
+    cout << "Worker: metadados recebidos -> largura=" << g_in.w
+            << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << endl;
 
     // Alocação
     g_in.data  = (unsigned char*)malloc(g_in.w * g_in.h);
@@ -147,7 +115,7 @@ int main(int argc, char** argv) {
     // Fecha o FIFO, pois já lemos tudo
     close(fifo);
 
-    std::cout << "Worker: começando processamento..." << std::endl;
+    cout << "Worker: começando processamento..." << endl;
 
     // Criar threads e dividir a imagem em blocos
     pthread_t threads[NUM_THREADS];
@@ -167,12 +135,12 @@ int main(int argc, char** argv) {
     // Espera todas as threads terminarem
     for (int i = 0; i < NUM_THREADS; i++) pthread_join(threads[i], nullptr);
 
-    std::cout << "Worker: processado! Salvando imagem..." << std::endl;
+   cout << "Worker: processado! Salvando imagem..." << endl;
 
     // Salva a imagem processada
     write_pgm(outpath, &g_out);
 
-    std::cout << "Worker: imagem salva em " << outpath << std::endl;
+    cout << "Worker: imagem salva em " << outpath << endl;
 
     // Libera memória
     free(g_in.data);

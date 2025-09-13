@@ -43,7 +43,7 @@ int write_pgm(const char* path, const PGM* img) {
     fclose(file);
     return 0;
 }
-
+/*
 ssize_t read_n_bytes(int fd, void* buffer, size_t n) {
     size_t total_read = 0;
     char* buf = (char*)buffer;
@@ -63,4 +63,4 @@ ssize_t read_n_bytes(int fd, void* buffer, size_t n) {
         total_read += r;
     }
     return total_read;
-}
+}*/
