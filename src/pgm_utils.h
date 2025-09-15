@@ -12,15 +12,14 @@ struct PGM {
 };
 
 // Estrutura do cabeçalho (opcional, caso queira enviar metadados)
-struct Header {
+/*struct Header {
     int w, h, maxv;
     int mode; // 0 = NEGATIVO, 1 = SLICE
     int t1, t2;
-};
+};*/
 
 // Funções para leitura e escrita de PGM
 int read_pgm(const char* path, PGM* img);
 int write_pgm(const char* path, const PGM* img);
-ssize_t read_n_bytes(int fd, void* buffer, size_t n);
 
 #endif

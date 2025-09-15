@@ -1,150 +1,228 @@
-#include <iostream>     // Para cout/cerr
-#include <pthread.h>    // Para threads
-#include <fcntl.h>      // Para open()
-#include <sys/stat.h>   // Para mkfifo()
-#include <unistd.h>     // Para read() e close()
-#include <cstring>      // Para strcmp()
-#include "pgm_utils.h"  // Estruturas e funções para PGM
-#include "filters.h"    // Funções de filtro negativo e slice
-using namespace std;
-// Número de threads que vamos usar
-const int NUM_THREADS = 4;
+#include <iostream>     // cout/cerr
+#include <pthread.h>    // threads, mutex
+#include <semaphore.h>  // semáforos POSIX (sem_init, sem_wait, sem_post)
+#include <fcntl.h>      // open()
+#include <sys/stat.h>   // mkfifo()
+#include <unistd.h>     // read(), close()
+#include <cstring>      // strcmp()
+#include <vector>
+#include "pgm_utils.h"
+#include "filters.h"
 
-// Estruturas globais para armazenar imagem de entrada e saída
+using namespace std;
+
+/*=========================
+  Configuração geral
+=========================*/
+static const char* FIFO_PATH = "/tmp/imgpipe";
+static const int   NUM_THREADS_DEFAULT = 4;
+static const int   ROWS_PER_TASK = 64; // granulação das tarefas
+
+// Imagens globais compartilhadas (somente leitura em g_in, escrita em g_out)
 PGM g_in, g_out;
 
-// Modo do filtro (0 = NEGATIVO, 1 = SLICE)
-int g_mode;
-int g_t1, g_t2;  // Limites do slice (apenas se g_mode = 1)
+// Modo do filtro: 0 = NEGATIVO, 1 = SLICE
+int g_mode = 0;
+int g_t1 = 0, g_t2 = 0;
 
-// Estrutura para passar argumentos para cada thread
-struct ThreadArgs {
-    int start_row;  // Linha inicial do bloco
-    int end_row;    // Linha final do bloco (exclusiva)
+// Número de threads do pool
+int g_nthreads = NUM_THREADS_DEFAULT;
+
+/*=========================
+  Tarefas e Fila (bounded)
+=========================*/
+struct Task {
+    int row_start;  // inclusivo
+    int row_end;    // exclusivo
 };
 
-// Função que cada thread vai executar
-void* process_lines(void* arg) {
-    ThreadArgs* args = (ThreadArgs*)arg; // Converte o ponteiro genérico para ThreadArgs
-    int start = args->start_row;         // Pega a linha inicial
-    int end = args->end_row;             // Pega a linha final
+// Sentinela que indica fim
+static const Task SENTINEL = {-1, -1};
 
-    if (g_mode == 0) {
-        // Aplica o filtro negativo nesse bloco de linhas
-        apply_negative(&g_in, &g_out, start, end);
-    } else {
-        // Aplica o filtro slice nesse bloco de linhas
-        apply_slice(&g_in, &g_out, start, end, g_t1, g_t2);
-    }
+#define QMAX 128
+Task qbuf[QMAX];
+int   q_head = 0, q_tail = 0;
 
-    return nullptr; // Fim da thread
+// Sincronização da fila
+pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
+sem_t sem_items;  // quantas tarefas disponíveis
+sem_t sem_space;  // espaços livres no buffer
+
+// Enfileirar tarefa (produtor)
+void q_push(Task t) {
+    sem_wait(&sem_space);               // espera espaço
+    pthread_mutex_lock(&q_lock);        // exclusão mútua
+    qbuf[q_tail] = t;
+    q_tail = (q_tail + 1) % QMAX;
+    pthread_mutex_unlock(&q_lock);
+    sem_post(&sem_items);               // sinaliza item disponível
 }
 
+// Retirar tarefa (consumidor)
+Task q_pop() {
+    sem_wait(&sem_items);               // espera item
+    pthread_mutex_lock(&q_lock);
+    Task t = qbuf[q_head];
+    q_head = (q_head + 1) % QMAX;
+    pthread_mutex_unlock(&q_lock);
+    sem_post(&sem_space);               // libera espaço
+    return t;
+}
+
+/*=========================
+  Thread trabalhadora
+=========================*/
+void* worker_thread(void*) {
+    while (true) {
+        Task t = q_pop();
+        if (t.row_start < 0 && t.row_end < 0) {
+            // Sentinela: termina a thread
+            break;
+        }
+        if (g_mode == 0) {
+            apply_negative(&g_in, &g_out, t.row_start, t.row_end);
+        } else {
+            apply_slice(&g_in, &g_out, t.row_start, t.row_end, g_t1, g_t2);
+        }
+    }
+    return nullptr;
+}
+
+/*=========================
+  Main do processo worker
+=========================*/
 int main(int argc, char** argv) {
-    // Verifica se os argumentos foram passados corretamente
+    // Uso: ./worker <saida.pgm> <negativo|slice> [t1 t2] [nthreads]
     if (argc < 3) {
-        cerr << "Uso: " << argv[0] << " <saida.pgm> <negativo|slice> [t1 t2]" << endl;
+        cerr << "Uso: " << argv[0] << " <saida.pgm> <negativo|slice> [t1 t2] [nthreads]\n";
         return -1;
     }
 
-    const char* outpath = argv[1];  // Caminho do arquivo de saída
-    const char* mode = argv[2];     // Tipo de filtro
+    const char* outpath = argv[1];
+    const char* mode    = argv[2];
 
-    // Define o modo do filtro
-    if (strcmp(mode, "negativo") == 0) g_mode = 0;
-    else if (strcmp(mode, "slice") == 0) {
-        g_mode = 1;
-        if (argc < 5) { // Slice precisa dos limites t1 e t2
-           cerr << "Para slice, informe t1 e t2!" << endl;
+    if (strcmp(mode, "negativo") == 0) {
+        g_mode = 0;
+        if (argc >= 4) g_nthreads = atoi(argv[3]); // opcional: permitir ./worker out.pgm negativo 8
+    } else if (strcmp(mode, "slice") == 0) {
+        if (argc < 5) {
+            cerr << "Para slice, use: " << argv[0] << " <saida.pgm> slice <t1> <t2> [nthreads]\n";
             return -1;
         }
-        g_t1 = atoi(argv[3]); // Converte argumento string para inteiro
+        g_mode = 1;
+        g_t1 = atoi(argv[3]);
         g_t2 = atoi(argv[4]);
-    } else { // Modo inválido
-        cerr << "Modo inválido!" << endl;
+        if (argc >= 6) g_nthreads = atoi(argv[5]);
+    } else {
+        cerr << "Modo invalido! Use 'negativo' ou 'slice'.\n";
         return -1;
     }
 
-    // Cria o FIFO no Linux, se ainda não existir
-    mkfifo("/tmp/imgpipe", 0666);
+    // Cria FIFO (ignora erro se já existir)
+    mkfifo(FIFO_PATH, 0666);
 
-    int fifo = open("/tmp/imgpipe", O_RDONLY);
-    if (fifo == -1) { perror("Erro ao abrir FIFO"); return -1; }
-
-    // Para bloquear até o sender escrever
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(fifo, &rfds);
-    select(fifo + 1, &rfds, NULL, NULL, NULL);
-
-    cout << "Worker: metadados recebidos -> largura=" << g_in.w
-          << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << endl;
-
+    // Abre FIFO para leitura (bloqueia até o sender abrir escrita)
+    int fifo = open(FIFO_PATH, O_RDONLY);
+    if (fifo == -1) {
+        perror("Erro ao abrir FIFO");
+        return -1;
+    }
 
     // Lê metadados
-    read(fifo, &g_in.w, sizeof(g_in.w));
-    read(fifo, &g_in.h, sizeof(g_in.h));
-    read(fifo, &g_in.maxv, sizeof(g_in.maxv));
+    if (read(fifo, &g_in.w, sizeof(g_in.w)) != sizeof(g_in.w) ||
+        read(fifo, &g_in.h, sizeof(g_in.h)) != sizeof(g_in.h) ||
+        read(fifo, &g_in.maxv, sizeof(g_in.maxv)) != sizeof(g_in.maxv)) {
+        perror("Erro ao ler metadados");
+        close(fifo);
+        return -1;
+    }
 
-    // >>> preencha o cabeçalho de saída <<<
-    g_out.w    = g_in.w;
-    g_out.h    = g_in.h;
+    // Prepara cabeçalho de saída
+    g_out.w = g_in.w;
+    g_out.h = g_in.h;
     g_out.maxv = g_in.maxv;
 
-    cout << "Worker: metadados recebidos -> largura=" << g_in.w
-            << ", altura=" << g_in.h << ", maxv=" << g_in.maxv << endl;
+    cout << "Worker: metadados recebidos -> w=" << g_in.w
+         << " h=" << g_in.h << " maxv=" << g_in.maxv << endl;
 
-    // Alocação
-    g_in.data  = (unsigned char*)malloc(g_in.w * g_in.h);
-    g_out.data = (unsigned char*)malloc(g_in.w * g_in.h);
+    // Aloca buffers
+    size_t total_bytes = static_cast<size_t>(g_in.w) * g_in.h;
+    g_in.data  = (unsigned char*)malloc(total_bytes);
+    g_out.data = (unsigned char*)malloc(total_bytes);
+    if (!g_in.data || !g_out.data) {
+        cerr << "Falha ao alocar memoria.\n";
+        close(fifo);
+        return -1;
+    }
 
-    // Lê os pixels da imagem do FIFO
-    //read(fifo, g_in.data, g_in.w * g_in.h * sizeof(unsigned char));
-    size_t total_bytes = g_in.w * g_in.h * sizeof(unsigned char);
+    // Lê todos os pixels (loop robusto)
     size_t bytes_read = 0;
-
     while (bytes_read < total_bytes) {
         ssize_t r = read(fifo, g_in.data + bytes_read, total_bytes - bytes_read);
         if (r <= 0) {
             perror("Erro ao ler pixels do FIFO");
-            break;
+            free(g_in.data);
+            free(g_out.data);
+            close(fifo);
+            return -1;
         }
-        bytes_read += r;
+        bytes_read += (size_t)r;
     }
-
-    // Fecha o FIFO, pois já lemos tudo
     close(fifo);
 
-    cout << "Worker: começando processamento..." << endl;
+    cout << "Worker: recebimento concluido. Processando com " << g_nthreads << " threads...\n";
 
-    // Criar threads e dividir a imagem em blocos
-    pthread_t threads[NUM_THREADS];
-    ThreadArgs args[NUM_THREADS];
+    // --- INÍCIO medição de tempo ---
+    timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    // ------------------------------
 
-    int rows_per_thread = g_in.h / NUM_THREADS; // Número de linhas por thread
+    // Inicializa semáforos da fila
+    sem_init(&sem_items, 0, 0);        // começa sem itens
+    sem_init(&sem_space, 0, QMAX);     // buffer começa cheio de espaço
 
-    for (int i = 0; i < NUM_THREADS; i++) {
-        args[i].start_row = i * rows_per_thread; // Linha inicial do bloco
-        if (i == NUM_THREADS - 1) args[i].end_row = g_in.h; // Última thread pega resto
-        else args[i].end_row = (i + 1) * rows_per_thread;  // Linha final (exclusiva)
-
-        // Cria a thread para processar o bloco
-        pthread_create(&threads[i], nullptr, process_lines, &args[i]);
+    // Cria pool de threads
+    vector<pthread_t> threads(g_nthreads);
+    for (int i = 0; i < g_nthreads; ++i) {
+        pthread_create(&threads[i], nullptr, worker_thread, nullptr);
     }
 
-    // Espera todas as threads terminarem
-    for (int i = 0; i < NUM_THREADS; i++) pthread_join(threads[i], nullptr);
+    // PRODUZIR tarefas em blocos (particionamento dinâmico)
+    for (int rs = 0; rs < g_in.h; rs += ROWS_PER_TASK) {
+        int re = rs + ROWS_PER_TASK;
+        if (re > g_in.h) re = g_in.h;
+        q_push({rs, re});
+    }
 
-   cout << "Worker: processado! Salvando imagem..." << endl;
+    // Enfileira N sentinelas para encerrar as threads
+    for (int i = 0; i < g_nthreads; ++i) q_push(SENTINEL);
 
-    // Salva a imagem processada
-    write_pgm(outpath, &g_out);
+    // Espera threads
+    for (int i = 0; i < g_nthreads; ++i) {
+        pthread_join(threads[i], nullptr);
+    }
 
-    cout << "Worker: imagem salva em " << outpath << endl;
+    // --- FIM da medição ---
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double elapsed = (end.tv_sec - start.tv_sec) +
+                    (end.tv_nsec - start.tv_nsec) / 1e9;
+    cout << "Tempo de processamento paralelo: " << elapsed << " segundos\n";
+    // ----------------------
 
-    // Libera memória
+    cout << "Worker: processamento concluido. Salvando...\n";
+    // Grava result
+    if (write_pgm(outpath, &g_out) != 0) {
+        cerr << "Erro ao salvar " << outpath << endl;
+    } else {
+        cout << "Worker: imagem salva em " << outpath << endl;
+    }
+
+    // Limpa recursos
     free(g_in.data);
     free(g_out.data);
+    sem_destroy(&sem_items);
+    sem_destroy(&sem_space);
+    // q_lock é estático — não precisa destruir para este programa simples
 
-    return 0; // Fim do programa
+    return 0;
 }

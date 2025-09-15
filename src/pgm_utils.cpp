@@ -43,24 +43,3 @@ int write_pgm(const char* path, const PGM* img) {
     fclose(file);
     return 0;
 }
-/*
-ssize_t read_n_bytes(int fd, void* buffer, size_t n) {
-    size_t total_read = 0;
-    char* buf = (char*)buffer;
-    while (total_read < n) {
-        ssize_t r = read(fd, buf + total_read, n - total_read);
-        if (r <= 0) {
-            if (r == 0) {
-                // EOF inesperado
-                break;
-            }
-            if (errno == EINTR) {
-                continue; // tentar novamente
-            }
-            perror("read");
-            break;
-        }
-        total_read += r;
-    }
-    return total_read;
-}*/

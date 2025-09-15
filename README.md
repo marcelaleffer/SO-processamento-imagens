@@ -10,7 +10,7 @@ Projeto em C++ que aplica filtros em imagens PGM usando **FIFO** e **threads**.
 - mkfifo /tmp/imgpipe
 - g++ src/sender.cpp src/pgm_utils.cpp -o sender -lpthread
 - g++ src/worker.cpp src/pgm_utils.cpp src/filters.cpp -o worker -lpthread
-- ./worker out/resultado-negativo.pgm negativo
+- ./worker /tmp/imgpipe saida_negativo.pgm negativo <quantidade de threads>
 
 ### Termminal 2:
 - ./sender img/templo_do_sol.pgm
@@ -24,7 +24,7 @@ Projeto em C++ que aplica filtros em imagens PGM usando **FIFO** e **threads**.
 - mkfifo /tmp/imgpipe
 - g++ src/sender.cpp src/pgm_utils.cpp -o sender -lpthread
 - g++ src/worker.cpp src/pgm_utils.cpp src/filters.cpp -o worker -lpthread
-- ./worker out/resultado-limiarizacao.pgm slice 80 160
+- ./worker out/resultado-limiarizacao.pgm slice 80 160 <quantidade de threads>
 
 ### Termminal 2:
 - ./sender img/templo_do_sol.pgm
